@@ -1,0 +1,835 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Autonomous Vehicle Detection</title>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: #101820;
+    color: white;
+    font-family: Arial, sans-serif;
+    text-align: center;
+}
+
+header {
+    background: #172b3a;
+    padding: 18px;
+}
+
+h1 {
+    color: #00d4ff;
+    margin: 5px;
+}
+
+.container {
+    max-width: 850px;
+    margin: auto;
+    padding: 15px;
+}
+
+.camera-box {
+    position: relative;
+    width: 100%;
+    max-width: 720px;
+    margin: 20px auto;
+    background: black;
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+video {
+    display: block;
+    width: 100%;
+}
+
+canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+button {
+    padding: 12px 18px;
+    margin: 6px;
+    border: none;
+    border-radius: 7px;
+    background: #008eb5;
+    color: white;
+    font-size: 15px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #00b9df;
+}
+
+.stop {
+    background: #d62828;
+}
+
+.status {
+    background: #172b3a;
+    border-radius: 8px;
+    padding: 12px;
+    margin: 10px 0;
+}
+
+#detections {
+    text-align: left;
+    background: #172b3a;
+    padding: 12px;
+    border-radius: 8px;
+    min-height: 50px;
+}
+
+.green {
+    color: #00ff99;
+}
+
+.red {
+    color: #ff6060;
+}
+
+</style>
+</head>
+
+<body>
+
+<header>
+    <h1>Autonomous Vehicle Detection</h1>
+    <p>YOLOv8s-World AI Object Detection</p>
+</header>
+
+<div class="container">
+
+    <div class="status">
+        Model:
+        <span id="modelStatus">Loading...</span>
+    </div>
+
+    <div class="status">
+        Bluetooth:
+        <span id="bleStatus">Not connected</span>
+    </div>
+
+    <div class="camera-box">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <button onclick="startCamera()">Start Camera</button>
+    <button onclick="stopCamera()">Stop Camera</button>
+    <button onclick="connectBluetooth()">Connect ESP32</button>
+    <button class="stop" onclick="sendStop()">STOP ROBOT</button>
+
+    <h3>Detected Objects</h3>
+
+    <div id="detections">
+        Waiting for camera...
+    </div>
+
+</div>
+
+<script>
+
+// ======================================
+// 1. MODEL CONFIGURATION
+// ======================================
+
+const MODEL_URL =
+"https://huggingface.co/srushti-5/autonomous-vehicle-model/resolve/main/yolov8s-worldv2.onnx";
+
+const INPUT_SIZE = 640;
+const CONFIDENCE_THRESHOLD = 0.35;
+const IOU_THRESHOLD = 0.45;
+
+// ======================================
+// 2. OBJECT CLASSES
+// ======================================
+
+const CLASSES = [
+    "person",
+    "pedestrian",
+    "worker",
+    "car",
+    "truck",
+    "bus",
+    "motorcycle",
+    "bicycle",
+    "tractor",
+    "auto rickshaw",
+    "dog",
+    "cat",
+    "cow",
+    "buffalo",
+    "horse",
+    "goat",
+    "sheep",
+    "elephant",
+    "rock",
+    "large rock",
+    "tree",
+    "tree trunk",
+    "plant",
+    "bush",
+    "grass",
+    "gravel",
+    "fallen tree",
+    "branch",
+    "road",
+    "asphalt",
+    "building",
+    "wall",
+    "fence",
+    "pothole"
+];
+
+// ======================================
+// 3. GLOBAL VARIABLES
+// ======================================
+
+let session = null;
+let stream = null;
+let detecting = false;
+let bluetoothDevice = null;
+let writeCharacteristic = null;
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+const detectionsDiv =
+document.getElementById("detections");
+
+// BLE UUID CONFIGURATION
+
+const SERVICE_UUID =
+"6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+
+const WRITE_UUID =
+"6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+
+// ======================================
+// 4. LOAD ONNX MODEL
+// ======================================
+
+async function loadModel() {
+
+    try {
+
+        document.getElementById("modelStatus").textContent =
+        "Loading original ONNX model...";
+
+        session = await ort.InferenceSession.create(
+            MODEL_URL,
+            {
+                executionProviders: ["wasm"]
+            }
+        );
+
+        console.log("Model loaded!");
+
+        console.log("Inputs:", session.inputNames);
+        console.log("Outputs:", session.outputNames);
+
+        document.getElementById("modelStatus").textContent =
+        "Connected successfully";
+
+        document.getElementById("modelStatus").className =
+        "green";
+
+    }
+
+    catch(error) {
+
+        console.error(error);
+
+        document.getElementById("modelStatus").textContent =
+        "Model loading failed: " + error.message;
+
+    }
+
+}
+
+// ======================================
+// 5. START CAMERA
+// ======================================
+
+async function startCamera() {
+
+    try {
+
+        if (!session) {
+            alert("Please wait for the AI model to load.");
+            return;
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia({
+
+            video: {
+                facingMode: "environment"
+            },
+
+            audio: false
+
+        });
+
+        video.srcObject = stream;
+
+        await video.play();
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        detecting = true;
+
+        detectLoop();
+
+    }
+
+    catch(error) {
+
+        alert("Camera error: " + error.message);
+
+        console.error(error);
+
+    }
+
+}
+
+// ======================================
+// 6. STOP CAMERA
+// ======================================
+
+function stopCamera() {
+
+    detecting = false;
+
+    if (stream) {
+
+        stream.getTracks().forEach(track => track.stop());
+
+        stream = null;
+
+    }
+
+    video.srcObject = null;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    sendCommand("CAMERA_STOPPED");
+
+}
+
+// ======================================
+// 7. IMAGE PREPROCESSING
+// ======================================
+
+function preprocessImage() {
+
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
+
+    const scale = Math.min(
+        INPUT_SIZE / sourceWidth,
+        INPUT_SIZE / sourceHeight
+    );
+
+    const resizedWidth = Math.round(sourceWidth * scale);
+    const resizedHeight = Math.round(sourceHeight * scale);
+
+    const padX = (INPUT_SIZE - resizedWidth) / 2;
+    const padY = (INPUT_SIZE - resizedHeight) / 2;
+
+    const tempCanvas = document.createElement("canvas");
+
+    tempCanvas.width = INPUT_SIZE;
+    tempCanvas.height = INPUT_SIZE;
+
+    const tempCtx = tempCanvas.getContext("2d");
+
+    tempCtx.fillStyle = "black";
+
+    tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+
+    tempCtx.drawImage(
+        video,
+        0,
+        0,
+        sourceWidth,
+        sourceHeight,
+        padX,
+        padY,
+        resizedWidth,
+        resizedHeight
+    );
+
+    const imageData = tempCtx.getImageData(
+        0,
+        0,
+        INPUT_SIZE,
+        INPUT_SIZE
+    );
+
+    const pixels = imageData.data;
+
+    const input = new Float32Array(
+        1 * 3 * INPUT_SIZE * INPUT_SIZE
+    );
+
+    const plane = INPUT_SIZE * INPUT_SIZE;
+
+    for (let i = 0; i < plane; i++) {
+
+        input[i] = pixels[i * 4] / 255;
+
+        input[plane + i] =
+        pixels[i * 4 + 1] / 255;
+
+        input[2 * plane + i] =
+        pixels[i * 4 + 2] / 255;
+
+    }
+
+    return {
+        tensor: new ort.Tensor(
+            "float32",
+            input,
+            [1, 3, INPUT_SIZE, INPUT_SIZE]
+        ),
+
+        scale,
+        padX,
+        padY,
+        sourceWidth,
+        sourceHeight
+    };
+
+}
+
+// ======================================
+// 8. IOU CALCULATION
+// ======================================
+
+function calculateIoU(a, b) {
+
+    const x1 = Math.max(a.x1, b.x1);
+    const y1 = Math.max(a.y1, b.y1);
+
+    const x2 = Math.min(a.x2, b.x2);
+    const y2 = Math.min(a.y2, b.y2);
+
+    const intersection =
+    Math.max(0, x2 - x1) *
+    Math.max(0, y2 - y1);
+
+    const areaA =
+    (a.x2 - a.x1) * (a.y2 - a.y1);
+
+    const areaB =
+    (b.x2 - b.x1) * (b.y2 - b.y1);
+
+    return intersection /
+    (areaA + areaB - intersection + 1e-6);
+
+}
+
+// ======================================
+// 9. NON-MAXIMUM SUPPRESSION
+// ======================================
+
+function applyNMS(boxes) {
+
+    boxes.sort((a, b) => b.conf - a.conf);
+
+    const selected = [];
+
+    for (const box of boxes) {
+
+        let keep = true;
+
+        for (const selectedBox of selected) {
+
+            if (
+                box.classId === selectedBox.classId &&
+                calculateIoU(box, selectedBox) > IOU_THRESHOLD
+            ) {
+
+                keep = false;
+                break;
+
+            }
+
+        }
+
+        if (keep) selected.push(box);
+
+    }
+
+    return selected;
+
+}
+
+// ======================================
+// 10. DECODE YOLO OUTPUT
+// ======================================
+
+function decodeOutput(output, transform) {
+
+    const data = output.data;
+
+    const candidates = 8400;
+    const channels = 38;
+
+    const boxes = [];
+
+    const {
+        scale,
+        padX,
+        padY,
+        sourceWidth,
+        sourceHeight
+    } = transform;
+
+    for (let i = 0; i < candidates; i++) {
+
+        let maxScore = 0;
+        let classId = -1;
+
+        // Find highest class confidence
+
+        for (let c = 0; c < 34; c++) {
+
+            const score = data[(c + 4) * candidates + i];
+
+            if (score > maxScore) {
+
+                maxScore = score;
+                classId = c;
+
+            }
+
+        }
+
+        if (maxScore < CONFIDENCE_THRESHOLD) continue;
+
+        // YOLO output: center X, center Y, width, height
+
+        const cx = data[i];
+        const cy = data[candidates + i];
+
+        const width = data[2 * candidates + i];
+        const height = data[3 * candidates + i];
+
+        let x1 = (cx - width / 2 - padX) / scale;
+        let y1 = (cy - height / 2 - padY) / scale;
+
+        let x2 = (cx + width / 2 - padX) / scale;
+        let y2 = (cy + height / 2 - padY) / scale;
+
+        x1 = Math.max(0, Math.min(sourceWidth, x1));
+        y1 = Math.max(0, Math.min(sourceHeight, y1));
+
+        x2 = Math.max(0, Math.min(sourceWidth, x2));
+        y2 = Math.max(0, Math.min(sourceHeight, y2));
+
+        if (x2 <= x1 || y2 <= y1) continue;
+
+        boxes.push({
+
+            x1,
+            y1,
+            x2,
+            y2,
+            conf: maxScore,
+            classId
+
+        });
+
+    }
+
+    return applyNMS(boxes);
+
+}
+
+// ======================================
+// 11. DRAW BOUNDING BOXES
+// ======================================
+
+function drawDetections(boxes) {
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    for (const box of boxes) {
+
+        const x = box.x1;
+        const y = box.y1;
+
+        const width = box.x2 - box.x1;
+        const height = box.y2 - box.y1;
+
+        const name = CLASSES[box.classId];
+
+        const confidence =
+        (box.conf * 100).toFixed(1);
+
+        ctx.strokeStyle = "#00ff66";
+        ctx.lineWidth = 3;
+
+        ctx.strokeRect(x, y, width, height);
+
+        ctx.fillStyle = "#00aa55";
+
+        ctx.font = "bold 16px Arial";
+
+        const label =
+        name + " " + confidence + "%";
+
+        const textWidth =
+        ctx.measureText(label).width;
+
+        ctx.fillRect(
+            x,
+            Math.max(0, y - 24),
+            textWidth + 10,
+            24
+        );
+
+        ctx.fillStyle = "white";
+
+        ctx.fillText(
+            label,
+            x + 5,
+            Math.max(17, y - 7)
+        );
+
+    }
+
+}
+
+// ======================================
+// 12. DETECTION LOOP
+// ======================================
+
+async function detectLoop() {
+
+    if (!detecting || !session) return;
+
+    try {
+
+        if (video.readyState >= 2) {
+
+            const processed = preprocessImage();
+
+            const feeds = {};
+
+            feeds[session.inputNames[0]] =
+            processed.tensor;
+
+            const results = await session.run(feeds);
+
+            const output =
+            results[session.outputNames[0]];
+
+            const boxes = decodeOutput(
+                output,
+                processed
+            );
+
+            drawDetections(boxes);
+
+            updateDetectionList(boxes);
+
+            // Send strongest detection to ESP32
+
+            if (boxes.length > 0) {
+
+                const best = boxes[0];
+
+                sendCommand(
+                    "DETECT:" +
+                    CLASSES[best.classId] +
+                    ":" +
+                    best.conf.toFixed(3)
+                );
+
+            } else {
+
+                sendCommand("CLEAR");
+
+            }
+
+        }
+
+    }
+
+    catch(error) {
+
+        console.error("Detection error:", error);
+
+        document.getElementById("modelStatus").textContent =
+        "Detection error: " + error.message;
+
+        detecting = false;
+
+        return;
+
+    }
+
+    if (detecting) {
+
+        requestAnimationFrame(detectLoop);
+
+    }
+
+}
+
+// ======================================
+// 13. DISPLAY OBJECT LIST
+// ======================================
+
+function updateDetectionList(boxes) {
+
+    if (boxes.length === 0) {
+
+        detectionsDiv.innerHTML = "No objects detected";
+
+        return;
+
+    }
+
+    detectionsDiv.innerHTML = boxes.map(box => {
+
+        return `
+        <p>
+        ${CLASSES[box.classId]}
+        -
+        ${(box.conf * 100).toFixed(1)}%
+        </p>
+        `;
+
+    }).join("");
+
+}
+
+// ======================================
+// 14. BLUETOOTH CONNECTION
+// ======================================
+
+async function connectBluetooth() {
+
+    try {
+
+        if (!navigator.bluetooth) {
+
+            alert("Web Bluetooth is not supported in this browser.");
+
+            return;
+
+        }
+
+        bluetoothDevice =
+        await navigator.bluetooth.requestDevice({
+
+            filters: [
+                { name: "Robot_Receiver" }
+            ],
+
+            optionalServices: [SERVICE_UUID]
+
+        });
+
+        const server =
+        await bluetoothDevice.gatt.connect();
+
+        const service =
+        await server.getPrimaryService(SERVICE_UUID);
+
+        writeCharacteristic =
+        await service.getCharacteristic(WRITE_UUID);
+
+        document.getElementById("bleStatus").textContent =
+        "Connected to Robot_Receiver";
+
+        document.getElementById("bleStatus").className =
+        "green";
+
+    }
+
+    catch(error) {
+
+        console.error(error);
+
+        alert("Bluetooth connection failed: " + error.message);
+
+    }
+
+}
+
+// ======================================
+// 15. SEND BLUETOOTH COMMAND
+// ======================================
+
+async function sendCommand(command) {
+
+    if (!writeCharacteristic) return;
+
+    try {
+
+        const data =
+        new TextEncoder().encode(command + "\n");
+
+        if (writeCharacteristic.properties.write) {
+
+            await writeCharacteristic.writeValueWithResponse(data);
+
+        } else {
+
+            await writeCharacteristic.writeValueWithoutResponse(data);
+
+        }
+
+    }
+
+    catch(error) {
+
+        console.error("BLE send error:", error);
+
+    }
+
+}
+
+// ======================================
+// 16. STOP ROBOT
+// ======================================
+
+function sendStop() {
+
+    sendCommand("STOP");
+
+}
+
+// ======================================
+// 17. INITIALIZE
+// ======================================
+
+loadModel();
+
+</script>
+
+</body>
+</html>
