@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,8 +6,7 @@
 
 <title>Autonomous Vehicle Detection</title>
 
-<!-- ONNX Runtime WebGPU -->
-<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.webgpu.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 
 <style>
 * {
@@ -25,39 +23,33 @@ body {
 
 header {
     background: #172b3a;
-    padding: 15px;
+    padding: 18px;
 }
 
 h1 {
     color: #00d4ff;
+    margin: 5px;
 }
 
 .container {
     max-width: 850px;
     margin: auto;
-    padding: 12px;
-}
-
-.status {
-    background: #172b3a;
-    padding: 12px;
-    margin: 8px 0;
-    border-radius: 8px;
+    padding: 15px;
 }
 
 .camera-box {
     position: relative;
     width: 100%;
     max-width: 720px;
-    margin: 15px auto;
+    margin: 20px auto;
     background: black;
-    border-radius: 10px;
+    border-radius: 12px;
     overflow: hidden;
 }
 
 video {
-    width: 100%;
     display: block;
+    width: 100%;
 }
 
 canvas {
@@ -70,17 +62,29 @@ canvas {
 }
 
 button {
-    padding: 12px 16px;
-    margin: 5px;
+    padding: 12px 18px;
+    margin: 6px;
     border: none;
     border-radius: 7px;
     background: #008eb5;
     color: white;
     font-size: 15px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #00b9df;
 }
 
 .stop {
     background: #d62828;
+}
+
+.status {
+    background: #172b3a;
+    border-radius: 8px;
+    padding: 12px;
+    margin: 10px 0;
 }
 
 #detections {
@@ -88,7 +92,7 @@ button {
     background: #172b3a;
     padding: 12px;
     border-radius: 8px;
-    white-space: pre-line;
+    min-height: 50px;
 }
 
 .green {
@@ -98,6 +102,7 @@ button {
 .red {
     color: #ff6060;
 }
+
 </style>
 </head>
 
@@ -116,18 +121,8 @@ button {
     </div>
 
     <div class="status">
-        Inference Engine:
-        <span id="engineStatus">Checking...</span>
-    </div>
-
-    <div class="status">
         Bluetooth:
         <span id="bleStatus">Not connected</span>
-    </div>
-
-    <div class="status">
-        Detection Speed:
-        <span id="speedStatus">Waiting</span>
     </div>
 
     <div class="camera-box">
@@ -135,10 +130,10 @@ button {
         <canvas id="canvas"></canvas>
     </div>
 
-    <button id="startBtn">Start Camera</button>
-    <button id="stopBtn">Stop Camera</button>
-    <button id="bleBtn">Connect ESP32</button>
-    <button id="robotStopBtn" class="stop">STOP ROBOT</button>
+    <button onclick="startCamera()">Start Camera</button>
+    <button onclick="stopCamera()">Stop Camera</button>
+    <button onclick="connectBluetooth()">Connect ESP32</button>
+    <button class="stop" onclick="sendStop()">STOP ROBOT</button>
 
     <h3>Detected Objects</h3>
 
@@ -158,20 +153,8 @@ const MODEL_URL =
 "https://huggingface.co/srushti-5/autonomous-vehicle-model/resolve/main/yolov8s-worldv2.onnx";
 
 const INPUT_SIZE = 640;
-
 const CONFIDENCE_THRESHOLD = 0.35;
 const IOU_THRESHOLD = 0.45;
-
-// Delay between inference runs
-const DETECTION_DELAY_MS = 250;
-
-// Maximum boxes
-const MAX_CANDIDATES_FOR_NMS = 300;
-const MAX_DISPLAY_BOXES = 30;
-
-// BLE heartbeat
-const BLE_HEARTBEAT_MS = 700;
-
 
 // ======================================
 // 2. OBJECT CLASSES
@@ -214,53 +197,24 @@ const CLASSES = [
     "pothole"
 ];
 
-
 // ======================================
 // 3. GLOBAL VARIABLES
 // ======================================
 
 let session = null;
 let stream = null;
-
 let detecting = false;
-let inferenceBusy = false;
-
 let bluetoothDevice = null;
 let writeCharacteristic = null;
 
-let lastBleCommand = "";
-let lastBleSendTime = 0;
-
-let inferenceCount = 0;
-let fpsWindowStart = 0;
-
-let animationTimer = null;
-
-let activeEngine = "unknown";
-
-
 const video = document.getElementById("video");
-
 const canvas = document.getElementById("canvas");
-
 const ctx = canvas.getContext("2d");
 
 const detectionsDiv =
 document.getElementById("detections");
 
-const modelStatus =
-document.getElementById("modelStatus");
-
-const engineStatus =
-document.getElementById("engineStatus");
-
-const speedStatus =
-document.getElementById("speedStatus");
-
-
-// ======================================
-// 4. BLUETOOTH UUID
-// ======================================
+// BLE UUID CONFIGURATION
 
 const SERVICE_UUID =
 "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
@@ -268,122 +222,50 @@ const SERVICE_UUID =
 const WRITE_UUID =
 "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
 
-
 // ======================================
-// 5. REUSABLE PREPROCESSING CANVAS
-// ======================================
-
-const inputCanvas = document.createElement("canvas");
-
-inputCanvas.width = INPUT_SIZE;
-inputCanvas.height = INPUT_SIZE;
-
-const inputCtx = inputCanvas.getContext("2d", {
-    alpha: false,
-    willReadFrequently: true
-});
-
-const inputBuffer = new Float32Array(
-    3 * INPUT_SIZE * INPUT_SIZE
-);
-
-const textEncoder = new TextEncoder();
-
-
-// ======================================
-// 6. LOAD ONNX MODEL
+// 4. LOAD ONNX MODEL
 // ======================================
 
 async function loadModel() {
 
-    modelStatus.textContent = "Loading model...";
+    try {
 
-    engineStatus.textContent = "Trying WebGPU...";
+        document.getElementById("modelStatus").textContent =
+        "Loading original ONNX model...";
 
-    // Try WebGPU first
-    if (navigator.gpu) {
+        session = await ort.InferenceSession.create(
+            MODEL_URL,
+            {
+                executionProviders: ["wasm"]
+            }
+        );
 
-        try {
+        console.log("Model loaded!");
 
-            session =
-            await ort.InferenceSession.create(
-                MODEL_URL,
-                {
-                    executionProviders: ["webgpu"],
-                    graphOptimizationLevel: "all"
-                }
-            );
+        console.log("Inputs:", session.inputNames);
+        console.log("Outputs:", session.outputNames);
 
-            activeEngine = "WebGPU";
+        document.getElementById("modelStatus").textContent =
+        "Connected successfully";
 
-        }
-
-        catch(error) {
-
-            console.warn(
-                "WebGPU failed:",
-                error
-            );
-
-            session = null;
-
-        }
+        document.getElementById("modelStatus").className =
+        "green";
 
     }
 
-    // Fallback to WASM
-    if (!session) {
+    catch(error) {
 
-        try {
+        console.error(error);
 
-            engineStatus.textContent =
-            "Loading WASM CPU engine...";
-
-            session =
-            await ort.InferenceSession.create(
-                MODEL_URL,
-                {
-                    executionProviders: ["wasm"],
-                    graphOptimizationLevel: "all"
-                }
-            );
-
-            activeEngine = "WASM CPU";
-
-        }
-
-        catch(error) {
-
-            console.error(error);
-
-            modelStatus.textContent =
-            "Model loading failed: " + error.message;
-
-            modelStatus.className = "red";
-
-            return;
-
-        }
+        document.getElementById("modelStatus").textContent =
+        "Model loading failed: " + error.message;
 
     }
-
-    modelStatus.textContent = "Loaded successfully";
-
-    modelStatus.className = "green";
-
-    engineStatus.textContent = activeEngine;
-
-    console.log("Model loaded");
-
-    console.log("Inputs:", session.inputNames);
-
-    console.log("Outputs:", session.outputNames);
 
 }
 
-
 // ======================================
-// 7. START CAMERA
+// 5. START CAMERA
 // ======================================
 
 async function startCamera() {
@@ -391,37 +273,14 @@ async function startCamera() {
     try {
 
         if (!session) {
-
-            alert("Please wait for the model to load.");
-
+            alert("Please wait for the AI model to load.");
             return;
-
         }
 
-        if (detecting) return;
-
-        stream =
-        await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
 
             video: {
-
-                facingMode: {
-                    ideal: "environment"
-                },
-
-                width: {
-                    ideal: 640
-                },
-
-                height: {
-                    ideal: 480
-                },
-
-                frameRate: {
-                    ideal: 15,
-                    max: 20
-                }
-
+                facingMode: "environment"
             },
 
             audio: false
@@ -433,137 +292,92 @@ async function startCamera() {
         await video.play();
 
         canvas.width = video.videoWidth;
-
         canvas.height = video.videoHeight;
 
         detecting = true;
 
-        inferenceBusy = false;
-
-        runDetectionLoop();
+        detectLoop();
 
     }
 
     catch(error) {
 
-        console.error(error);
-
         alert("Camera error: " + error.message);
+
+        console.error(error);
 
     }
 
 }
 
-
 // ======================================
-// 8. STOP CAMERA
+// 6. STOP CAMERA
 // ======================================
 
 function stopCamera() {
 
     detecting = false;
 
-    if (animationTimer !== null) {
-
-        clearTimeout(animationTimer);
-
-        animationTimer = null;
-
-    }
-
     if (stream) {
 
-        stream.getTracks().forEach(
-            track => track.stop()
-        );
+        stream.getTracks().forEach(track => track.stop());
 
         stream = null;
 
     }
 
-    video.pause();
-
     video.srcObject = null;
 
-    ctx.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    speedStatus.textContent = "Stopped";
-
-    detectionsDiv.textContent = "Camera stopped";
-
-    sendCommand("CAMERA_STOPPED", true);
+    sendCommand("CAMERA_STOPPED");
 
 }
 
-
 // ======================================
-// 9. IMAGE PREPROCESSING
+// 7. IMAGE PREPROCESSING
 // ======================================
 
 function preprocessImage() {
 
     const sourceWidth = video.videoWidth;
-
     const sourceHeight = video.videoHeight;
 
-    if (!sourceWidth || !sourceHeight) {
-
-        throw new Error("Camera frame is not ready");
-
-    }
-
     const scale = Math.min(
-
         INPUT_SIZE / sourceWidth,
-
         INPUT_SIZE / sourceHeight
-
     );
 
-    const resizedWidth =
-    Math.round(sourceWidth * scale);
+    const resizedWidth = Math.round(sourceWidth * scale);
+    const resizedHeight = Math.round(sourceHeight * scale);
 
-    const resizedHeight =
-    Math.round(sourceHeight * scale);
+    const padX = (INPUT_SIZE - resizedWidth) / 2;
+    const padY = (INPUT_SIZE - resizedHeight) / 2;
 
-    const padX =
-    (INPUT_SIZE - resizedWidth) / 2;
+    const tempCanvas = document.createElement("canvas");
 
-    const padY =
-    (INPUT_SIZE - resizedHeight) / 2;
+    tempCanvas.width = INPUT_SIZE;
+    tempCanvas.height = INPUT_SIZE;
 
-    inputCtx.fillStyle = "black";
+    const tempCtx = tempCanvas.getContext("2d");
 
-    inputCtx.fillRect(
-        0,
-        0,
-        INPUT_SIZE,
-        INPUT_SIZE
-    );
+    tempCtx.fillStyle = "black";
 
-    inputCtx.drawImage(
+    tempCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
 
+    tempCtx.drawImage(
         video,
-
         0,
         0,
         sourceWidth,
         sourceHeight,
-
         padX,
         padY,
         resizedWidth,
         resizedHeight
-
     );
 
-    const imageData =
-    inputCtx.getImageData(
+    const imageData = tempCtx.getImageData(
         0,
         0,
         INPUT_SIZE,
@@ -572,29 +386,28 @@ function preprocessImage() {
 
     const pixels = imageData.data;
 
-    const plane =
-    INPUT_SIZE * INPUT_SIZE;
+    const input = new Float32Array(
+        1 * 3 * INPUT_SIZE * INPUT_SIZE
+    );
+
+    const plane = INPUT_SIZE * INPUT_SIZE;
 
     for (let i = 0; i < plane; i++) {
 
-        const p = i * 4;
+        input[i] = pixels[i * 4] / 255;
 
-        inputBuffer[i] =
-        pixels[p] / 255;
+        input[plane + i] =
+        pixels[i * 4 + 1] / 255;
 
-        inputBuffer[plane + i] =
-        pixels[p + 1] / 255;
-
-        inputBuffer[2 * plane + i] =
-        pixels[p + 2] / 255;
+        input[2 * plane + i] =
+        pixels[i * 4 + 2] / 255;
 
     }
 
     return {
-
         tensor: new ort.Tensor(
             "float32",
-            inputBuffer,
+            input,
             [1, 3, INPUT_SIZE, INPUT_SIZE]
         ),
 
@@ -603,66 +416,44 @@ function preprocessImage() {
         padY,
         sourceWidth,
         sourceHeight
-
     };
 
 }
 
-
 // ======================================
-// 10. IOU CALCULATION
+// 8. IOU CALCULATION
 // ======================================
 
 function calculateIoU(a, b) {
 
     const x1 = Math.max(a.x1, b.x1);
-
     const y1 = Math.max(a.y1, b.y1);
 
     const x2 = Math.min(a.x2, b.x2);
-
     const y2 = Math.min(a.y2, b.y2);
 
     const intersection =
-
     Math.max(0, x2 - x1) *
-
     Math.max(0, y2 - y1);
 
     const areaA =
-
-    Math.max(0, a.x2 - a.x1) *
-
-    Math.max(0, a.y2 - a.y1);
+    (a.x2 - a.x1) * (a.y2 - a.y1);
 
     const areaB =
-
-    Math.max(0, b.x2 - b.x1) *
-
-    Math.max(0, b.y2 - b.y1);
+    (b.x2 - b.x1) * (b.y2 - b.y1);
 
     return intersection /
-
     (areaA + areaB - intersection + 1e-6);
 
 }
 
-
 // ======================================
-// 11. NON-MAXIMUM SUPPRESSION
+// 9. NON-MAXIMUM SUPPRESSION
 // ======================================
 
 function applyNMS(boxes) {
 
-    boxes.sort(
-        (a, b) => b.conf - a.conf
-    );
-
-    if (boxes.length > MAX_CANDIDATES_FOR_NMS) {
-
-        boxes.length = MAX_CANDIDATES_FOR_NMS;
-
-    }
+    boxes.sort((a, b) => b.conf - a.conf);
 
     const selected = [];
 
@@ -670,35 +461,21 @@ function applyNMS(boxes) {
 
         let keep = true;
 
-        for (const chosen of selected) {
+        for (const selectedBox of selected) {
 
             if (
-
-                box.classId === chosen.classId &&
-
-                calculateIoU(box, chosen) > IOU_THRESHOLD
-
+                box.classId === selectedBox.classId &&
+                calculateIoU(box, selectedBox) > IOU_THRESHOLD
             ) {
 
                 keep = false;
-
                 break;
 
             }
 
         }
 
-        if (keep) {
-
-            selected.push(box);
-
-        }
-
-        if (selected.length >= MAX_DISPLAY_BOXES) {
-
-            break;
-
-        }
+        if (keep) selected.push(box);
 
     }
 
@@ -706,158 +483,70 @@ function applyNMS(boxes) {
 
 }
 
-
 // ======================================
-// 12. DECODE YOLO OUTPUT
+// 10. DECODE YOLO OUTPUT
 // ======================================
 
 function decodeOutput(output, transform) {
 
     const data = output.data;
 
-    const dims = output.dims;
+    const candidates = 8400;
+    const channels = 38;
 
-    if (!dims || dims.length !== 3) {
-
-        throw new Error(
-            "Unexpected ONNX output dimensions: " + dims
-        );
-
-    }
-
-    let channels;
-
-    let candidates;
-
-    let channelMajor;
-
-    if (dims[1] === CLASSES.length + 4) {
-
-        channels = dims[1];
-
-        candidates = dims[2];
-
-        channelMajor = true;
-
-    }
-
-    else if (dims[2] === CLASSES.length + 4) {
-
-        candidates = dims[1];
-
-        channels = dims[2];
-
-        channelMajor = false;
-
-    }
-
-    else {
-
-        throw new Error(
-            "Unexpected model output shape: " + dims.join("x")
-        );
-
-    }
+    const boxes = [];
 
     const {
-
         scale,
         padX,
         padY,
         sourceWidth,
         sourceHeight
-
     } = transform;
-
-    const boxes = [];
 
     for (let i = 0; i < candidates; i++) {
 
         let maxScore = 0;
-
         let classId = -1;
 
-        for (let c = 0; c < CLASSES.length; c++) {
+        // Find highest class confidence
 
-            const index = channelMajor
+        for (let c = 0; c < 34; c++) {
 
-                ? (c + 4) * candidates + i
-
-                : i * channels + c + 4;
-
-            const score = data[index];
+            const score = data[(c + 4) * candidates + i];
 
             if (score > maxScore) {
 
                 maxScore = score;
-
                 classId = c;
 
             }
 
         }
 
-        if (maxScore < CONFIDENCE_THRESHOLD) {
+        if (maxScore < CONFIDENCE_THRESHOLD) continue;
 
-            continue;
+        // YOLO output: center X, center Y, width, height
 
-        }
+        const cx = data[i];
+        const cy = data[candidates + i];
 
-        const cx =
-        data[channelMajor ? i : i * channels];
+        const width = data[2 * candidates + i];
+        const height = data[3 * candidates + i];
 
-        const cy =
-        data[channelMajor
-            ? candidates + i
-            : i * channels + 1];
+        let x1 = (cx - width / 2 - padX) / scale;
+        let y1 = (cy - height / 2 - padY) / scale;
 
-        const w =
-        data[channelMajor
-            ? 2 * candidates + i
-            : i * channels + 2];
+        let x2 = (cx + width / 2 - padX) / scale;
+        let y2 = (cy + height / 2 - padY) / scale;
 
-        const h =
-        data[channelMajor
-            ? 3 * candidates + i
-            : i * channels + 3];
+        x1 = Math.max(0, Math.min(sourceWidth, x1));
+        y1 = Math.max(0, Math.min(sourceHeight, y1));
 
-        let x1 =
-        (cx - w / 2 - padX) / scale;
+        x2 = Math.max(0, Math.min(sourceWidth, x2));
+        y2 = Math.max(0, Math.min(sourceHeight, y2));
 
-        let y1 =
-        (cy - h / 2 - padY) / scale;
-
-        let x2 =
-        (cx + w / 2 - padX) / scale;
-
-        let y2 =
-        (cy + h / 2 - padY) / scale;
-
-        x1 = Math.max(
-            0,
-            Math.min(sourceWidth, x1)
-        );
-
-        y1 = Math.max(
-            0,
-            Math.min(sourceHeight, y1)
-        );
-
-        x2 = Math.max(
-            0,
-            Math.min(sourceWidth, x2)
-        );
-
-        y2 = Math.max(
-            0,
-            Math.min(sourceHeight, y2)
-        );
-
-        if (x2 <= x1 || y2 <= y1) {
-
-            continue;
-
-        }
+        if (x2 <= x1 || y2 <= y1) continue;
 
         boxes.push({
 
@@ -876,28 +565,20 @@ function decodeOutput(output, transform) {
 
 }
 
-
 // ======================================
-// 13. DRAW DETECTIONS
+// 11. DRAW BOUNDING BOXES
 // ======================================
 
 function drawDetections(boxes) {
 
-    ctx.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
-    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     for (const box of boxes) {
 
         const x = box.x1;
-
         const y = box.y1;
 
         const width = box.x2 - box.x1;
-
         const height = box.y2 - box.y1;
 
         const name = CLASSES[box.classId];
@@ -906,34 +587,23 @@ function drawDetections(boxes) {
         (box.conf * 100).toFixed(1);
 
         ctx.strokeStyle = "#00ff66";
+        ctx.lineWidth = 3;
 
-        ctx.lineWidth = Math.max(
-            2,
-            canvas.width / 300
-        );
+        ctx.strokeRect(x, y, width, height);
 
-        ctx.strokeRect(
-            x,
-            y,
-            width,
-            height
-        );
+        ctx.fillStyle = "#00aa55";
+
+        ctx.font = "bold 16px Arial";
 
         const label =
         name + " " + confidence + "%";
 
-        ctx.font = "bold 16px Arial";
-
         const textWidth =
         ctx.measureText(label).width;
 
-        const labelY = Math.max(0, y - 24);
-
-        ctx.fillStyle = "#00aa55";
-
         ctx.fillRect(
             x,
-            labelY,
+            Math.max(0, y - 24),
             textWidth + 10,
             24
         );
@@ -950,68 +620,17 @@ function drawDetections(boxes) {
 
 }
 
-
 // ======================================
-// 14. UPDATE DETECTION LIST
-// ======================================
-
-function updateDetectionList(boxes) {
-
-    if (boxes.length === 0) {
-
-        detectionsDiv.textContent =
-        "No objects detected";
-
-        return;
-
-    }
-
-    detectionsDiv.textContent =
-    boxes.map(box => {
-
-        return (
-
-            CLASSES[box.classId] +
-
-            " - " +
-
-            (box.conf * 100).toFixed(1) +
-
-            "%"
-
-        );
-
-    }).join("\n");
-
-}
-
-
-// ======================================
-// 15. DETECTION LOOP
+// 12. DETECTION LOOP
 // ======================================
 
-async function runDetectionLoop() {
+async function detectLoop() {
 
-    if (
-        !detecting ||
-        !session ||
-        inferenceBusy
-    ) {
-
-        return;
-
-    }
-
-    inferenceBusy = true;
-
-    const startTime = performance.now();
+    if (!detecting || !session) return;
 
     try {
 
-        if (
-            video.readyState >=
-            HTMLMediaElement.HAVE_CURRENT_DATA
-        ) {
+        if (video.readyState >= 2) {
 
             const processed = preprocessImage();
 
@@ -1020,73 +639,36 @@ async function runDetectionLoop() {
             feeds[session.inputNames[0]] =
             processed.tensor;
 
-            const results =
-            await session.run(feeds);
+            const results = await session.run(feeds);
 
             const output =
             results[session.outputNames[0]];
 
-            const boxes =
-            decodeOutput(output, processed);
+            const boxes = decodeOutput(
+                output,
+                processed
+            );
 
             drawDetections(boxes);
 
             updateDetectionList(boxes);
 
-            // Send only strongest object
-            let command = "CLEAR";
+            // Send strongest detection to ESP32
 
             if (boxes.length > 0) {
 
                 const best = boxes[0];
 
-                command =
+                sendCommand(
+                    "DETECT:" +
+                    CLASSES[best.classId] +
+                    ":" +
+                    best.conf.toFixed(3)
+                );
 
-                "DETECT:" +
+            } else {
 
-                CLASSES[best.classId] +
-
-                ":" +
-
-                best.conf.toFixed(3);
-
-            }
-
-            await sendCommand(command);
-
-            // Calculate detection speed
-            inferenceCount++;
-
-            const now = performance.now();
-
-            if (!fpsWindowStart) {
-
-                fpsWindowStart = now;
-
-            }
-
-            if (now - fpsWindowStart >= 2000) {
-
-                const fps =
-
-                inferenceCount * 1000 /
-
-                (now - fpsWindowStart);
-
-                speedStatus.textContent =
-
-                fps.toFixed(1) +
-
-                " detections/sec | " +
-
-                (performance.now() - startTime)
-                .toFixed(0) +
-
-                " ms/inference";
-
-                inferenceCount = 0;
-
-                fpsWindowStart = now;
+                sendCommand("CLEAR");
 
             }
 
@@ -1096,15 +678,10 @@ async function runDetectionLoop() {
 
     catch(error) {
 
-        console.error(
-            "Detection error:",
-            error
-        );
+        console.error("Detection error:", error);
 
-        modelStatus.textContent =
+        document.getElementById("modelStatus").textContent =
         "Detection error: " + error.message;
-
-        modelStatus.className = "red";
 
         detecting = false;
 
@@ -1112,26 +689,44 @@ async function runDetectionLoop() {
 
     }
 
-    finally {
-
-        inferenceBusy = false;
-
-    }
-
     if (detecting) {
 
-        animationTimer = setTimeout(
-            runDetectionLoop,
-            DETECTION_DELAY_MS
-        );
+        requestAnimationFrame(detectLoop);
 
     }
 
 }
 
+// ======================================
+// 13. DISPLAY OBJECT LIST
+// ======================================
+
+function updateDetectionList(boxes) {
+
+    if (boxes.length === 0) {
+
+        detectionsDiv.innerHTML = "No objects detected";
+
+        return;
+
+    }
+
+    detectionsDiv.innerHTML = boxes.map(box => {
+
+        return `
+        <p>
+        ${CLASSES[box.classId]}
+        -
+        ${(box.conf * 100).toFixed(1)}%
+        </p>
+        `;
+
+    }).join("");
+
+}
 
 // ======================================
-// 16. BLUETOOTH CONNECTION
+// 14. BLUETOOTH CONNECTION
 // ======================================
 
 async function connectBluetooth() {
@@ -1140,9 +735,7 @@ async function connectBluetooth() {
 
         if (!navigator.bluetooth) {
 
-            alert(
-                "Web Bluetooth is not supported in this browser."
-            );
+            alert("Web Bluetooth is not supported in this browser.");
 
             return;
 
@@ -1159,23 +752,6 @@ async function connectBluetooth() {
 
         });
 
-        bluetoothDevice.addEventListener(
-            "gattserverdisconnected",
-            () => {
-
-                writeCharacteristic = null;
-
-                document.getElementById(
-                    "bleStatus"
-                ).textContent = "Disconnected";
-
-                document.getElementById(
-                    "bleStatus"
-                ).className = "red";
-
-            }
-        );
-
         const server =
         await bluetoothDevice.gatt.connect();
 
@@ -1185,13 +761,11 @@ async function connectBluetooth() {
         writeCharacteristic =
         await service.getCharacteristic(WRITE_UUID);
 
-        document.getElementById(
-            "bleStatus"
-        ).textContent = "Connected to Robot_Receiver";
+        document.getElementById("bleStatus").textContent =
+        "Connected to Robot_Receiver";
 
-        document.getElementById(
-            "bleStatus"
-        ).className = "green";
+        document.getElementById("bleStatus").className =
+        "green";
 
     }
 
@@ -1199,119 +773,58 @@ async function connectBluetooth() {
 
         console.error(error);
 
-        alert(
-            "Bluetooth connection failed: " +
-            error.message
-        );
+        alert("Bluetooth connection failed: " + error.message);
 
     }
 
 }
 
-
 // ======================================
-// 17. SEND BLUETOOTH COMMAND
+// 15. SEND BLUETOOTH COMMAND
 // ======================================
 
-async function sendCommand(command, force = false) {
+async function sendCommand(command) {
 
     if (!writeCharacteristic) return;
-
-    const now = Date.now();
-
-    const changed =
-    command !== lastBleCommand;
-
-    const heartbeatDue =
-    now - lastBleSendTime >= BLE_HEARTBEAT_MS;
-
-    if (
-        !force &&
-        !changed &&
-        !heartbeatDue
-    ) {
-
-        return;
-
-    }
 
     try {
 
         const data =
-        textEncoder.encode(command + "\n");
+        new TextEncoder().encode(command + "\n");
 
         if (writeCharacteristic.properties.write) {
 
-            await writeCharacteristic.writeValueWithResponse(
-                data
-            );
+            await writeCharacteristic.writeValueWithResponse(data);
+
+        } else {
+
+            await writeCharacteristic.writeValueWithoutResponse(data);
 
         }
-
-        else if (
-            writeCharacteristic.properties.writeWithoutResponse
-        ) {
-
-            await writeCharacteristic.writeValueWithoutResponse(
-                data
-            );
-
-        }
-
-        else {
-
-            throw new Error(
-                "BLE characteristic does not support writing"
-            );
-
-        }
-
-        lastBleCommand = command;
-
-        lastBleSendTime = Date.now();
-
-        console.log("BLE sent:", command);
 
     }
 
     catch(error) {
 
-        console.error(
-            "BLE send error:",
-            error
-        );
+        console.error("BLE send error:", error);
 
     }
 
 }
 
-
 // ======================================
-// 18. STOP ROBOT
+// 16. STOP ROBOT
 // ======================================
 
-async function sendStop() {
+function sendStop() {
 
-    await sendCommand("STOP", true);
+    sendCommand("STOP");
 
 }
 
-
 // ======================================
-// 19. INITIALIZATION
+// 17. INITIALIZE
 // ======================================
-
-document.getElementById("startBtn")
-.addEventListener("click", startCamera);
-
-document.getElementById("stopBtn")
-.addEventListener("click", stopCamera);
-
-document.getElementById("bleBtn")
-.addEventListener("click", connectBluetooth);
-
-document.getElementById("robotStopBtn")
-.addEventListener("click", sendStop);
 
 loadModel();
 
